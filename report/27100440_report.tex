@@ -1,0 +1,212 @@
+    \documentclass{article}
+    \usepackage[preprint]{neurips_2026}
+    
+    \usepackage[utf8]{inputenc} 
+    \usepackage[T1]{fontenc}    
+    \usepackage{hyperref}       
+    \usepackage{url}
+    \usepackage{booktabs}
+    \usepackage{amsfonts}
+    \usepackage{nicefrac}
+    \usepackage{microtype}
+    \usepackage{xcolor}
+    \usepackage{graphicx}
+    
+    \title{Assignment 0: Introduction \\ Advanced Topics in Machine Learning}
+    
+    \author{%
+      Syed Ramiz Abbas \\
+      Lahore University of Management Sciences \\
+      \texttt{27100440@lums.edu.pk} \\
+      \url{https://github.com/sramiza/ATML-Assignment-0}
+    }
+    
+    \begin{document}
+    \maketitle
+    
+    \begin{abstract} 
+    This report unpacks the inner mechanics of four foundational deep learning paradigms to understand what actually drives their performance. We explore why ResNet-152 relies on transfer learning and skip connections to avoid optimization collapse, test the structural limits of Vision Transformers by masking input patches, investigate how CLIP's contrastive pre-training enables zero-shot classification despite a persistent Euclidean modality gap, and demonstrate the practical trade-offs of forcing a Variational Autoencoder to compress data into a strict 2D generative space. 
+    \end{abstract}
+    
+    \section{Task 1: Inner Workings of ResNet-152}
+    
+    \subsection{Baseline Setup}
+    Training ResNet-152 from scratch on the CIFAR-10 dataset is a bad idea because, one, the ResNet-152 model is massive, covering 60 million parameters whereas the CIFAR-10 dataset's 60,000 images produces a severe mismatch. This means training 60 million parameters on such a small amount of data would cause the model to severely overfit. Essentially, the model would simply memorise the training set, resulting in poor or non-existent generalisation on unseen data. Secondly, we run into the issue of wasteful computation. Training 152 deep convolutional layers is computationally expensive, and trying to forcefully re-learn foundational visual features like edges and textures wastes the compute power utilised to achieve it. These features are already learned by an ImageNet pre-training run, simply re-inventing the wheel and compromising efficiency.
+    
+    Freezing the backbone refers to telling PyTorch's autograd engine to ignore those redundant layers by setting the \texttt{requires\_grad} variable to \texttt{False}. During the forward pass, the image flows through the 152 layers like normal, and the network acts as a fixed function that converts raw pixels into a vector. During backpropagation, no gradients are calculated for these layers, and the optimiser makes zero weight updates to them. The unfrozen head is the fully connected layer we attached at the very end of the network to map features to our 10 CIFAR classes. During backpropagation, gradients are calculated only for this specific layer, thus we are training only a simple linear classifier on top of a locked feature extractor.
+    
+    Our baseline model dropped to a 0.5243 training loss and a 44.56\% validation accuracy in 3 epochs, which proves our model's transferability. To elaborate, given the simple linear nature of our classifier, if the vectors it was given were garbage and didn't actually encode anything relevant to the CIFAR-10 classes, the performance would have been much worse -- something closer to a random chance guess, like 10\% accuracy. This means the backbone successfully turned pixels from the training data into meaningful, class-relevant structure, and the head only needed to draw a boundary through that already-organised space.
+    
+    \subsection{Residual Connections in Practice}
+    In a standard network, a block of layers applies a transformation to the input $x$ to produce an output. For a transformation function $F$, the output would just be $y = F(x, W)$. When we add a skip connection, we take the original input $x$ and add it directly to the output of that transformation, essentially looking like $y = F(x, W) + x$. Mechanically, the network is no longer forced to learn the entire unreferenced output, and instead only learns the difference between the input and desired output, which we will call the residual.
+    
+    During backpropagation, the network calculates how much to change the input $x$ to minimise the loss $L$. In a standard network, the gradient involves multiplication with the network's weights, which are usually initialised to be very small. Multiplying these repeatedly across 152 layers causes the gradient to shrink exponentially. By the time the gradient reaches the early layers, it is essentially 0. By adding the skip connection ($+x$), the derivative changes. Now, even if the convolutional weights are tiny and the gradient shrinks to zero, it is multiplied by 1 and passed directly backward, allowing it to flow through the deepest networks.
+    
+    Our baseline achieved a 0.52 training loss and a 44.56\% validation accuracy, compared to a 2.02 loss and a 31.79\% accuracy when we removed the connections in the final blocks (\texttt{layer3} and \texttt{layer4}). This gap is empirical proof of the mathematical explanation. By severing those skip connections, the gradient dissipated before it could update the parameters, causing the optimiser to get stuck at a poor value of loss, thus proving that skip connections are vital for good gradient flow.
+    
+    \subsection{Feature Hierarchies and Representations}
+    t-SNE is a dimensionality reduction tool. The raw features coming out of ResNet are incredibly high-dimensional, about a 2048-dimensional vector for a single image. Human brains and standard plots can only comprehend 2D or 3D space, meaning we cannot physically plot 2048 dimensions directly. Therefore, we use t-SNE to take those 2048-dimensional vectors as input and output 2D coordinates. t-SNE calculates the mathematical distance between all the images in the high-dimensional space and then tries to arrange them on a 2D map so that images that were close together in 2048D remain close in 2D, while dissimilar images are pushed apart.
+    
+    \begin{figure}[h]
+      \centering
+      \includegraphics[width=\linewidth]{task1point2output.png} 
+      \caption{t-SNE visualization of CIFAR-10 test set embeddings extracted from Layer 1, Layer 3, and AvgPool of ResNet-152.}
+      \label{fig:tsne}
+    \end{figure}
+    
+    Layer 1 shows zero class separability because early convolutional layers have very small receptive fields, which are tiny pixel grids, and are entirely blind to the big picture. Because of this, they only detect fundamental visual parameters like horizontal edges, vertical lines, sharp corners, and colour gradients. At a microscopic level, a horizontal edge on a truck's chrome bumper looks mathematically identical to one on a cat's white collar. Since Layer 1 is just reporting edges and colours, the feature vectors for a cat and a truck are indistinguishable, resulting in a giant, overlapping mess on the t-SNE plot (Figure \ref{fig:tsne}).
+    
+    The AvgPool layer easily separates classes since the receptive field expands moving deeper into the network, aggregating information from the previous layers. By the time we reach the AvgPool layer, the receptive field covers the entire image, and the network has seen the whole picture. The network then combines those Layer 1 edges into mid-level shapes like wheels, eyes, and fur textures, and then combines those shapes into high-level semantic concepts. By the final layer, the feature vector effectively encodes ``fur, pointy ears, and whiskers'' instead of just ``a horizontal edge.'' Because these high-level concepts are fundamentally different, t-SNE can easily pull them apart into distinct, sharp clusters for classification.
+    
+    \subsection{Transfer Learning and Generalization}
+    We conducted a rapid 1-epoch comparative analysis to evaluate the trade-offs between computational cost and model accuracy across different transfer learning strategies. The results are summarized in Table \ref{tab:transfer_learning}.
+    
+    \begin{table}[h]
+      \caption{Comparison of Transfer Learning Strategies on CIFAR-10 (1 Epoch)}
+      \label{tab:transfer_learning}
+      \centering
+      \begin{tabular}{lcc}
+        \toprule
+        Training Strategy & Validation Accuracy & Compute Time (s) \\
+        \midrule
+        Random Initialization (Full Backbone) & 48.13\% & 1349.61 \\
+        Pretrained Weights (Head Only) & 82.41\% & 490.51 \\
+        Pretrained Weights (Layer 4 + Head) & 90.98\% & 543.03 \\
+        \bottomrule
+      \end{tabular}
+    \end{table}
+    
+    Training the full backbone from scratch yielded the worst performance (48.13\%) while consuming the most compute time (1349 seconds). Utilising pretrained weights and training only the head improved efficiency significantly, cutting down compute time while achieving 82.41\% accuracy. However, fine-tuning the final convolutional block alongside the head proved to be the most optimal strategy; it incurred a minimal computational penalty over the head-only approach while delivering the highest accuracy at 90.98\%. This suggests the early layers encode universal features, while the final blocks carry more task-specific structure worth re-adapting to CIFAR-10's classes.
+    
+    \section{Task 2: Understanding ViT}
+    
+    \subsection{Pre-trained Inference}
+    The ViT-B/16 classified our test image successfully without any fine-tuning. If we had fine-tuned it, we'd feed it a dataset of specific objects, such as dogs and cars in our case, and adjusted the weights via gradient descent so it learned specifically what our dogs and cars look like. The fact it worked zero-shot means that the ImageNet dataset it was originally trained on already forced the model to naturally encode robust representations for ``Samoyeds'' and ``sports cars.'' The pre-trained ViT-B/16 classified the first test image as a `Samoyed' with 79.97\% confidence and the second as a `sports car' with 55.78\% confidence, confirming a strong baseline inference capability using only the pre-trained weights.
+    
+    \subsection{Self-Attention Visualizations and Limitations}
+    The \texttt{[CLS]} token is a special, learnable vector that is attached to the sequence of image patches. It doesn't correspond to any physical location on the image; rather, it is there to act as a fresh consolidator. During self-attention, every token is projected into three vectors: a Query, a Key, and a Value. In terms of representation, when we say the \texttt{[CLS]} token attends to Patch X, it means we took the dot product of the \texttt{[CLS]} token's Query with Patch X's Key. If that dot product results in a high softmax probability, the \texttt{[CLS]} token pulls the Value information from that patch to update its own state. The attention map is just a visualisation of those probability scores.
+    
+    \begin{figure}[h]
+      \centering
+      \includegraphics[width=\linewidth]{TaskTwoOutput.png} 
+      \caption{Self-attention heatmaps extracted from the final layer of ViT-B/16 for the \texttt{[CLS]} token.}
+      \label{fig:vit_attention}
+    \end{figure}
+    
+    ViT's attention is ``built-in,'' which means the attention weights we visualise in a ViT are the actual mathematical routing instructions used during the forward pass. To generate an attention map, we don't perform any extra math; instead, we simply save the intermediate $QK^T$ matrix that the model was already calculating to pass information between layers. Convolutional networks don't inherently calculate ``attention'' to route data. To get a heatmap using Grad-CAM, we must run a complete forward pass, freeze the prediction, calculate the loss for that specific class, and then run a backward pass, which requires calculating the gradients of the target class with respect to the final feature maps to reverse-engineer what the network was sensitive to.
+    
+    Vision Transformers don't just calculate one attention matrix per layer. Instead, they use Multi-Head Attention, running the Q, K, and V projections in parallel across several independent ``heads.'' Specialization means that because these heads initialise randomly and operate independently, they learn to look for completely different visual properties, where one head finds edges, another finds textures, and another tracks background context. If we just average all the attention weights together, we blur all these specific features into one blob. We verified specialization by mathematically isolating the raw attention matrix of individual heads in the final layer. By plotting them separately, we empirically proved that some heads perfectly outlined the foreground subject, while other heads actively ignored the subject and focused exclusively on peripheral background context (Figure \ref{fig:vit_attention}).
+    
+    \subsection{Robustness to Patch Masking and Occlusion}
+    In our experiment, masking a patch means we turn all the pixels in that grid square black before the image is embedded. The sequence length stays exactly the same: if the image is split into 196 patches, the ViT still receives 196 token vectors. However, the token vectors corresponding to the masked patches now contain no information; they are simply black squares.
+    
+    \begin{figure}[h]
+      \centering
+      \includegraphics[width=\linewidth]{TaskTwoPointThreeOutput.png} 
+      \caption{ViT-B/16 inference results after masking 50\% of the input patches with black occlusions.}
+      \label{fig:vit_masked}
+    \end{figure}
+    
+    According to our findings, random masking heavily outperforms structured masking (maintaining 11.1\% accuracy versus 0\% at a 70\% masking ratio). This is because random masking scatters the missing data. Even at a high ratio like 70\%, a few patches of the subject, such as a dog's ears, a piece of its paw, and a patch of white fur, are likely to survive. Structured masking wipes out a contiguous block of pixels; therefore, if the object is in the centre, all of its defining features could be deleted, leaving only background information to capture. Self-attention is a global operation. Since every patch can attend to every other patch via the Query-Key dot product, a surviving patch of fur in the top-left corner can communicate directly with a surviving paw in the bottom-right corner, bypassing the deleted black space in between. As long as enough of such puzzle pieces survive anywhere on the board, the ViT can route them together to identify the subject. Structured masking simply removes all the puzzle pieces of the subject at once (Figure \ref{fig:vit_masked}).
+    
+    To answer why CNNs handle this worse than ViTs, we must understand that convolution is fundamentally a local mathematical operation. A CNN uses a sliding window that mathematically requires neighboring pixels to calculate gradients and detect edges. If a chunk of pixels is blacked out, the window sliding over that boundary is suddenly multiplying real pixel values against zeros, corrupting the feature map. Worse, CNNs build their understanding hierarchically: Layer 2 relies entirely on the local geometry detected by Layer 1. If a chunk of the image is missing, the gap in the feature map actually expands as it goes deeper into the network, eventually corrupting the entire representation. A ViT does not slide a window across the image; it treats the patches separately, and there is no local continuity requirement. If Patch 42 is blacked out, it has no mathematical impact on the self-attention calculation between Patch 12 and Patch 180. The network simply ignores the dead token and continues passing information between the surviving ones.
+    
+    \subsection{CLS Token vs. Mean-Pooled Patch Tokens}
+    Just as in Task 1, the entire pre-trained ViT is completely frozen. During the forward pass, we push the images through the ViT to extract the embeddings, but during backpropagation, zero weights in the ViT are updated. The linear probe we used is basically just a single, newly initialised linear layer put on top of the frozen embeddings; we train only the weights and biases of this single new layer. We are testing the pure quality and linear separability of the frozen representations by restricting the trainable parameters to just one linear matrix. If the probe achieves high accuracy, we prove that the frozen model grouped the classes into easily separable clusters in the latent space.
+    
+    We found that mean-pooling captures things the \texttt{[CLS]} token misses. This is because the \texttt{[CLS]} token is an artificial construct: during its original ImageNet pre-training, the loss function was connected to this single token. Therefore, the network was mathematically incentivized to use self-attention to forward only the most critical, class-discriminative information into this one vector while discarding anything deemed irrelevant to classification, acting as a highly compressed, lossy bottleneck. The 196 spatial patch tokens are not subjected to that same bottleneck; they retain rich, localized semantic and geometric information about specific parts of the image, like textures, background context, and secondary objects. When we mean-pool all 196 patch tokens, it captures a holistic, uncompressed representation of the entire scene, preserving localized details that the \texttt{[CLS]} token likely threw away because it didn't need them for its original pre-training task.
+    
+    Specifically, the \texttt{[CLS]} token probe achieved a test accuracy of 37.00\%, whereas the mean-pooled probe reached 40.80\%. This 3.8\% gap is noticeable, but not massive. This relatively tight margin suggests that the \texttt{[CLS]} token is actually accomplishing its intended purpose, which is acting as an efficient global summary -- the majority of the useful semantic information is successfully shared via self-attention. However, the fact that mean-pooling definitively wins proves that the \texttt{[CLS]} token is in fact a lossy compressor. That 3.8\% gap represents the leftover visual information that the \texttt{[CLS]} token discarded as noise during pre-training, but which the linear probe found useful for separating this specific downstream dataset.
+    
+    \section{Task 3: Contrastive Learning and CLIP Model}
+    
+    \subsection{Zero-Shot Classification}
+    Traditional convolutional networks like ResNet are boxed into a fixed number of predetermined classes, like the 1,000 ImageNet categories. CLIP, on the other hand, aligns vision and text within a shared latent space. This shift is what makes zero-shot classification possible, we can categorise images using open-ended natural language prompts without needing to fine-tune the model or collect labeled data.
+    
+    To test this out, we ran a pre-trained \texttt{clip-vit-base-patch32} model on an unconstrained image of a SpaceX rocket launch, feeding it four diverse text prompts. The results are as follows:
+    
+    \begin{itemize}
+        \item \textbf{'a photo of a space rocket':} 99.61\%
+        \item \textbf{'an astronaut riding a horse on mars':} 0.39\%
+        \item \textbf{'a person walking a dog in the park':} 0.00\%
+        \item \textbf{'a standard portrait of a man':} 0.00\%
+    \end{itemize}
+    
+    Despite never being explicitly trained on a ``space rocket'' class, the model successfully matched the visual data to the correct semantic text embedding with 99.61\% confidence. This confirms the power of contrastive pre-training in generalizing across diverse and entirely novel visual concepts.
+    
+    \subsection{Multimodal Similarity Heatmaps}
+    To visualise how CLIP bridges the gap between vision and language, we generated patch-level similarity heatmaps. We divided our input image into a grid of patches, computed the visual embedding for each patch, and calculated the cosine similarity against the text embeddings for two distinct prompts: `a dog' and `a cat'.
+    
+    \begin{figure}[h]
+      \centering
+      \includegraphics[width=\linewidth]{TaskThreePointTwoOutput.png} 
+      \caption{Patch-level cosine similarity heatmaps demonstrating CLIP's spatial localization of text concepts.}
+      \label{fig:clip_heatmap}
+    \end{figure}
+    
+    Looking at the heatmaps (Figure \ref{fig:clip_heatmap}), the model shows accurate spatial localization even though it was never explicitly trained for object detection. When we queried `a cat', the high-similarity scores accurately mapped to the cat's face. Interestingly, when queried with `a dog', an object completely absent from the scene, the heatmap still lit up around the cat's face. As noted previously, this is a per-image colour normalisation artifact: the plotting library scales the local maximum similarity to red. The raw cosine similarity score for `a dog' was objectively much lower, but the network defaults to highlighting the most salient foreground object when a true match is missing. This confirms that CLIP's contrastive pre-training enforces a structurally aware latent space where visual features and semantic text align.
+    
+    \subsection{Task 3: CLIP on STL-10 and the Modality Gap}
+    
+    \subsubsection{Zero-Shot Classification}
+    Evaluating CLIP on the STL-10 dataset using four different prompt styles yielded the following top-1 accuracies:
+    \begin{itemize}
+        \item \textbf{Plain labels:} 0.9625
+        \item \textbf{Photo prompts:} 0.9736
+        \item \textbf{Detailed prompts:} 0.9674
+        \item \textbf{Contextual prompts:} 0.9645
+    \end{itemize}
+    
+    Our results show that prompt engineering matters. ``Photo prompts'' performed best, which makes sense given that CLIP's training data mostly consists of naturalistic internet captions. Interestingly, detailed prompts didn't give a massive boost, meaning CLIP prioritises core semantic alignment over extra linguistic fluff.
+    
+    \subsubsection{Exploring and Bridging the Modality Gap}
+    To investigate how visual and textual representations relate geometrically, we extracted image and label embeddings for a subset of STL-10 samples. As seen in the t-SNE plot (Figure \ref{fig:modality_gap}, left panel), there is a pronounced modality gap: the embeddings from different modalities are visibly separated in the latent space. 
+    
+    To bridge this, we used an orthogonal Procrustes transform. Given the image embeddings as one set and the text embeddings as the other, the goal is to find an orthogonal matrix that minimizes the Frobenius norm between them. 
+    
+    \begin{figure}[h]
+      \centering
+      \includegraphics[width=\linewidth]{TaskThree.png} 
+      \caption{t-SNE visualization of the modality gap before (left) and after (right) Orthogonal Procrustes alignment.}
+      \label{fig:modality_gap}
+    \end{figure}
+    
+    After applying the transform, our post-alignment t-SNE plot (Figure \ref{fig:modality_gap}, right panel) shows the text prompts rotating perfectly into the geometric centres of their corresponding image clusters. This effectively closes the physical modality gap. However, the recomputed zero-shot classification accuracy barely moved, settling at 0.9685. While the Procrustes transformation minimizes the Euclidean distance by changing cross-modal angles, it applies a single, uniform rotation to the entire text cluster. Because the orthogonal matrix rigidly preserves the internal topology of the text embeddings, and the two modalities were already topologically mirrored, this global least-squares alignment simply overlays the structures. It doesn't have the freedom to optimize individual class pairings, meaning the relative ranking of candidate prompts remains largely undisturbed. This perfectly explains why the zero-shot accuracy is fundamentally unchanged.
+    
+    \section{Task 4: Variational Autoencoders}
+    
+    \subsection{Building and Training a Basic VAE}
+    We built a basic Variational Autoencoder (VAE) to model the generative distribution of the MNIST dataset. The encoder uses a Multi-Layer Perceptron (MLP) with a 400-neuron hidden layer to map the $28 \times 28$ input images down to a 2-dimensional latent space ($\mu$ and $\log \sigma^2$). We used the reparameterization trick to sample from the approximate posterior, allowing backpropagation through the stochastic node. The decoder then maps those 2D latent vectors back to the 784-dimensional pixel space. We trained the model for 15 epochs using the Adam optimizer, minimising the negative Evidence Lower Bound (ELBO), which combines Binary Cross-Entropy (reconstruction loss) and KL Divergence. The training loss converged smoothly, dropping from 189.18 to 152.90.
+    
+    \subsection{Analyzing VAE Performance}
+    
+    \begin{figure}[h]
+      \centering
+      \includegraphics[width=\linewidth]{TaskFour.png} 
+      \caption{VAE Evaluation: 2D Latent Space Map (left), Reconstruction Quality (middle), and Generated Samples (right).}
+      \label{fig:vae_analysis}
+    \end{figure}
+    
+    \textbf{Latent Space Visualization:} By restricting our latent dimensionality to $d = 2$, we were able to plot the test set embeddings directly onto a 2D plane (Figure \ref{fig:vae_analysis}, left). The VAE did an excellent job organising the space into a continuous manifold. Distinct digits like `1' form tight, isolated clusters, while structurally similar digits like `4' and `9' overlap. This shows the VAE actually learned semantic visual relationships instead of just memorising labels.
+    
+    \textbf{Reconstruction Quality:} Looking at the reconstructions (Figure \ref{fig:vae_analysis}, middle), the global structure and distinct strokes of the original digits are preserved. However, they are noticeably blurry. This is the expected trade-off of compressing the image into such an extreme 2D bottleneck and optimising with a pixel-wise Binary Cross-Entropy loss, which naturally tends to average out sharp edges.
+    
+    \textbf{Generation of New Samples:} When we sampled random vectors from the standard normal prior $\mathcal{N}(0, I)$, the model generated entirely new, plausible digit images (Figure \ref{fig:vae_analysis}, right). The samples capture the diversity of the MNIST dataset, though we do see some ambiguous, blended shapes (like a mix between an `8' and a `3'). This is a direct consequence of sampling from the continuous interpolative spaces between distinct digit clusters.
+    
+    \subsection{Comparing with Doersch's VAE Implementation}
+    Comparing our setup to Carl Doersch's reference VAE, we made several identical architectural choices:
+    
+    \begin{itemize}
+        \item \textbf{Architecture:} Both setups utilise an MLP architecture. Our model uses a single 400-neuron hidden layer for both the encoder and decoder, aligning perfectly with the lightweight dense networks typically used in foundational VAE tutorials.
+        \item \textbf{Output Distribution and Loss:} Our implementation matches Doersch's approach to the output distribution. Doersch assumes a Bernoulli distribution for the MNIST pixel intensities, treating them as probabilities, and employs a sigmoid cross-entropy loss. We achieved the exact same thing by utilising a final Sigmoid activation in our decoder and computing the reconstruction loss using Binary Cross-Entropy (BCE).
+        \item \textbf{Latent Dimensionality:} Doersch correctly notes that VAEs are generally insensitive to the dimensionality of the latent space $z$, provided it is not excessively small or large. We deliberately chose a highly constrained latent dimension of $d = 2$ so we could directly visualise it without secondary reduction techniques like t-SNE. While this gave us a clear visual map, this extreme compression is exactly why our reconstructions are slightly blurrier compared to models with higher-dimensional latent spaces.
+        \item \textbf{Results Comparison:} Our generated results share the exact same characteristics and failure cases noted by Doersch. While most generated samples look highly realistic, both our model and Doersch's struggle with ``in-between'' digits. Because the VAE enforces a smooth, continuous latent space, sampling from the boundaries between two digit clusters naturally yields blurry, hybrid shapes that resemble a mix of multiple classes.
+    \end{itemize}
+    
+    \section{Limitations and Threats to Validity}
+    Several experimental bounds govern these findings. First, t-SNE visualizations non-linearly warp global metric distances, meaning cluster proximity on 2D plots does not correspond to exact Euclidean distance in $\mathbb{R}^{512}$ or $\mathbb{R}^{2048}$. Second, patch attention maps were evaluated using terminal-layer class tokens, which aggregate contextual cues but do not fully reflect recursive multi-layer attention flow (as captured by Attention Rollout). Third, Procrustes alignment was evaluated on the STL-10 test split using orthogonal rotations, which preserve dot-product geometry; non-linear adapters would alter classification metrics differently. Finally, the VAE evaluation was restricted to a $d=2$ latent space on MNIST to prioritize visualization, which inherently limits reconstruction sharpness.
+    
+    \section{Conclusion}
+    This study evaluated the mathematical and empirical properties of foundational deep learning architectures. ResNet-152 confirms that residual identity highways are essential for gradient propagation in deep networks, and that hierarchical representations transition monotonically from generic edge detectors to category-discriminative clusters. Vision Transformers demonstrate that dynamic multi-head self-attention enables robust information routing capable of surviving extensive structural occlusion, with distributed patch tokens outperforming rigid class-token bottlenecks. CLIP illustrates that contrastive pre-training enforces a shared metric space where zero-shot classification is preserved despite a persistent Euclidean modality gap. Finally, Variational Autoencoders demonstrate how optimizing the Evidence Lower Bound structures high-dimensional data into continuous, sampleable generative manifolds.
+    
+    \end{document}
